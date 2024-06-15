@@ -306,7 +306,7 @@ def j_polynomial_zeros ( nt, alpha, beta):
 
   t, w = imtqlx ( nt, x, bj, c )
 
-  return t+1 # for [0, 2] interval
+  return  t + 1 # for [0, 2] interval
 
 def g_fullRWR(x):
     return (1)/(1 - x) 

@@ -290,7 +290,7 @@ class GArnoldi_prop(MessagePassing):
     propagation class for GPR_GNN
     '''
 
-    def __init__(self, K, alpha, Init, nameFunc, homophily, Vandermonde, lower, upper, Threeterm, Gamma=None, bias=True, **kwargs):
+    def __init__(self, K, alpha, Init, nameFunc, homophily, Vandermonde, lower, upper, Gamma=None, bias=True, **kwargs):
         super(GArnoldi_prop, self).__init__(aggr='add', **kwargs)
         self.K = K
         self.Init = Init
@@ -300,7 +300,6 @@ class GArnoldi_prop(MessagePassing):
         self.nameFunc = nameFunc
         self.lower = lower
         self.upper = upper
-        self.Threeterm = Threeterm
         #self.division =  
         assert Init in ['Monomial', 'Chebyshev', 'Legendre', 'Jacobi', 'PPR','SChebyshev']
         if Init == 'Monomial':
@@ -461,90 +460,24 @@ class GArnoldi_prop(MessagePassing):
                 self.temp.data[k] = self.alpha*(1-self.alpha)**k
             self.temp.data[-1] = (1-self.alpha)**self.K
 
-    # def forward(self, x, edge_index, edge_weight=None):
-    #     edge_index, norm = gcn_norm(
-    #         edge_index, edge_weight, num_nodes=x.size(0), dtype=x.dtype)
-    #     edge_index1, norm1 = get_laplacian(edge_index, edge_weight,normalization='sym', dtype=x.dtype, num_nodes=x.size(self.node_dim))
-    #     #edge_index_tilde, norm_tilde= add_self_loops(edge_index1,norm1,fill_value=-1.0,num_nodes=x.size(self.node_dim))
-    #     #2I-L
-    #     edge_index2, norm2=add_self_loops(edge_index1,-norm1,fill_value=2.,num_nodes=x.size(self.node_dim))
-    #     hidden = self.temp[self.K-1]*x
-    #     #hidden = x*(self.temp[0])
-    #     for k in range(self.K-2,-1,-1):
-    #         if (self.homophily):
-    #             x = self.propagate(edge_index, x=x, norm=norm)             
-    #         else:       
-    #             x = self.propagate(edge_index1, x=x, norm=norm1)
-    #         gamma = self.temp[k]
-            
-    #         x = x + gamma*hidden
-    #     return x
-    def forward(self, x, edge_index,edge_weight=None):
-        # coe_tmp=F.relu(self.temp)
-        # coe=coe_tmp.clone()
-       
-        # for i in range(self.K+1):
-        #     coe[i]=coe_tmp[0]*cheby(i,math.cos((self.K+0.5)*math.pi/(self.K+1)))
-        #     for j in range(1,self.K+1):
-        #         x_j=math.cos((self.K-j+0.5)*math.pi/(self.K+1))
-        #         coe[i]=coe[i]+coe_tmp[j]*cheby(i,x_j)
-        #     coe[i]=2*coe[i]/(self.K+1)
-       
-        #print(self.temp)
-        #coe = self.temp
-        if(self.Threeterm):
-            coe_tmp = torch.flip(self.temp, dims=(0,))
-            coe_tmp=self.temp
-            coe=coe_tmp.clone()
-            # coe2 = coe_tmp.clone()
-            # for i in range (self.K):
-            #     coe2[i] = coe[self.K-1-i]
-            
-            # coe = coe2.clone()
-           
-            edge_index, norm = gcn_norm(edge_index, edge_weight, num_nodes=x.size(0), dtype=x.dtype)
-    
-            #L=I-D^(-0.5)AD^(-0.5)
-            edge_index1, norm1 = get_laplacian(edge_index, edge_weight,normalization='sym', dtype=x.dtype, num_nodes=x.size(self.node_dim))
-    
-            #L_tilde=L-I
-            edge_index_tilde, norm_tilde= add_self_loops(edge_index1,norm1,fill_value=-1.0,num_nodes=x.size(self.node_dim))
-    
-            Tx_0=x
+    def forward(self, x, edge_index, edge_weight=None):
+        edge_index, norm = gcn_norm(
+            edge_index, edge_weight, num_nodes=x.size(0), dtype=x.dtype)
+        edge_index1, norm1 = get_laplacian(edge_index, edge_weight,normalization='sym', dtype=x.dtype, num_nodes=x.size(self.node_dim))
+        #edge_index_tilde, norm_tilde= add_self_loops(edge_index1,norm1,fill_value=-1.0,num_nodes=x.size(self.node_dim))
+        #2I-L
+        edge_index2, norm2=add_self_loops(edge_index1,-norm1,fill_value=2.,num_nodes=x.size(self.node_dim))
+        hidden = self.temp[self.K-1]*x
+        #hidden = x*(self.temp[0])
+        for k in range(self.K-2,-1,-1):
             if (self.homophily):
-                Tx_1=self.propagate(edge_index,x=x,norm=norm,size=None)
-            else:
-                Tx_1=self.propagate(edge_index1,x=x,norm=norm1,size=None)
-    
-            out=coe[0]/2*Tx_0+coe[1]*Tx_1
-    
-            for i in range(2,self.K-1):
-                if (self.homophily):
-                    Tx_2=self.propagate(edge_index,x=Tx_1,norm=norm,size=None)
-                else:
-                    Tx_2=self.propagate(edge_index1,x=Tx_1,norm=norm1,size=None)
-                Tx_2=2*Tx_2-Tx_0
-                out=out+coe[i]*Tx_2
-                Tx_0,Tx_1 = Tx_1, Tx_2
-            return out
-        else:
-            edge_index, norm = gcn_norm(
-                edge_index, edge_weight, num_nodes=x.size(0), dtype=x.dtype)
-            edge_index1, norm1 = get_laplacian(edge_index, edge_weight,normalization='sym', dtype=x.dtype, num_nodes=x.size(self.node_dim))
-            #edge_index_tilde, norm_tilde= add_self_loops(edge_index1,norm1,fill_value=-1.0,num_nodes=x.size(self.node_dim))
-            #2I-L
-            edge_index2, norm2=add_self_loops(edge_index1,-norm1,fill_value=2.,num_nodes=x.size(self.node_dim))
-            hidden = self.temp[self.K-1]*x
-            #hidden = x*(self.temp[0])
-            for k in range(self.K-2,-1,-1):
-                if (self.homophily):
-                    x = self.propagate(edge_index, x=x, norm=norm)             
-                else:       
-                    x = self.propagate(edge_index1, x=x, norm=norm1)
-                gamma = self.temp[k]
-                
-                x = x + gamma*hidden
-            return x
+                x = self.propagate(edge_index, x=x, norm=norm)             
+            else:       
+                x = self.propagate(edge_index1, x=x, norm=norm1)
+            gamma = self.temp[k]
+            
+            x = x + gamma*hidden
+        return x
 
     def message(self, x_j, norm):
         return norm.view(-1, 1) * x_j
@@ -563,7 +496,7 @@ class GARNOLDI(torch.nn.Module):
         if args.Arnoldippnp == 'PPNP':
             self.prop1 = APPNP(args.K, args.alpha)
         elif args.Arnoldippnp == 'GArnoldi_prop':
-            self.prop1 = GArnoldi_prop(args.K, args.alpha, args.ArnoldiInit, args.FuncName,args.homophily, args.Vandermonde, args.lower, args.upper, args.Threeterm,args.Gamma)
+            self.prop1 = GArnoldi_prop(args.K, args.alpha, args.ArnoldiInit, args.FuncName,args.homophily, args.Vandermonde, args.lower, args.upper,args.Gamma)
 
         self.Init = args.Init
         self.dprate = args.dprate

@@ -8,57 +8,51 @@
 """
 
 import argparse
-import numpy as np
-import torch
-import random
-import torch.nn.functional as F
-import sys
 from dataset_utils import DataLoader
-from sklearn.metrics import roc_auc_score
+from utils import random_planetoid_splits
 from GNN_models import *
+
+import torch
+import torch.nn.functional as F
 from tqdm import tqdm
+import sys
+import numpy as np
 
 
-@torch.no_grad()
-def accuracy(pr_logits, gt_labels):
-    return (pr_logits.argmax(dim=-1) == gt_labels).float().mean().item()
+def RunExp(args, dataset, data, Net, percls_trn, val_lb):
 
-@torch.no_grad()
-def roc_auc(pr_logits, gt_labels):
-    return roc_auc_score(gt_labels.cpu().numpy(), pr_logits[:, 1].cpu().numpy())  
-
-
-def RunExp(args, dataset, data, Net, split_id):
-    appnp_net = Net(dataset, args)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    model, data = appnp_net.to(device), data.to(device)
-
-    train_mask, val_mask, test_mask = \
-        data.train_mask[:, split_id], data.val_mask[:, split_id], data.test_mask[:, split_id]
-
-    def train(model, optimizer, data):
+    def train(model, optimizer, data, dprate):
         model.train()
         optimizer.zero_grad()
-        out = model(data)[train_mask]
-        loss = F.nll_loss(out, data.y[train_mask])
+        out = model(data)[data.train_mask]
+        nll = F.nll_loss(out, data.y[data.train_mask])
+        loss = nll
         loss.backward()
+
         optimizer.step()
         del out
 
-    @torch.no_grad()
-    def evaluate(model, data, metric: accuracy):
+    def test(model, data):
         model.eval()
-        # predict on whole data
-        logits = model(data)
-        stats = {}
-        for partition, mask in zip(['val', 'test'], [val_mask, test_mask]):
-            loss = F.nll_loss(logits[mask], data.y[mask]).item()
-            metric_value = metric(logits[mask], data.y[mask])
-            stats[f'{partition}/loss'] = loss
-            stats[f'{partition}/metric'] = metric_value
-           
-        return stats
+        logits, accs, losses, preds = model(data), [], [], []
+        for _, mask in data('train_mask', 'val_mask', 'test_mask'):
+            pred = logits[mask].max(1)[1]
+            acc = pred.eq(data.y[mask]).sum().item() / mask.sum().item()
+
+            loss = F.nll_loss(model(data)[mask], data.y[mask])
+
+            preds.append(pred.detach().cpu())
+            accs.append(acc)
+            losses.append(loss.detach().cpu())
+        return accs, preds, losses
+
+    appnp_net = Net(dataset, args)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    permute_masks = random_planetoid_splits
+    data = permute_masks(data, dataset.num_classes, percls_trn, val_lb)
+
+    model, data = appnp_net.to(device), data.to(device)
 
     if args.net in ['APPNP', 'GPRGNN','GARNOLDI','ARNOLDI']:
         optimizer = torch.optim.Adam([{
@@ -76,27 +70,25 @@ def RunExp(args, dataset, data, Net, split_id):
         ],
             lr=args.lr)
     else:
-        optimizer = torch.optim.Adam(
-            model.parameters(),
-            lr=args.lr,
-            weight_decay=args.weight_decay
-        )
+        optimizer = torch.optim.Adam(model.parameters(),
+                                     lr=args.lr,
+                                     weight_decay=args.weight_decay)
 
-    metric_fn = accuracy if dataset.num_classes > 2 else roc_auc
-
-    best_epoch = 0
-    best_val_metric = 0
-    test_metric = 0
-    patience = 0
+    best_val_acc = test_acc = 0
+    best_val_loss = float('inf')
+    val_loss_history = []
+    val_acc_history = []
 
     for epoch in range(args.epochs):
-        train(model, optimizer, data)
+        train(model, optimizer, data, args.dprate)
 
-        stats = evaluate(model, data, metric_fn)
+        [train_acc, val_acc, tmp_test_acc], preds, [
+            train_loss, val_loss, tmp_test_loss] = test(model, data)
 
-        if stats['val/metric'] > best_val_metric:
-            best_val_metric = stats['val/metric']
-            test_metric = stats['test/metric']
+        if val_loss < best_val_loss:
+            best_val_acc = val_acc
+            best_val_loss = val_loss
+            test_acc = tmp_test_acc
             if args.net == 'GPRGNN':
                 TEST = appnp_net.prop1.temp.clone()
                 Alpha = TEST.detach().cpu().numpy()
@@ -108,23 +100,17 @@ def RunExp(args, dataset, data, Net, split_id):
             else:
                 Alpha = args.alpha
             Gamma_0 = Alpha
-            # set patience to 0
-            patience = 0
 
-        else:
-            patience += 1
-        if patience >= args.early_stopping:
-            break
+        if epoch >= 0:
+            val_loss_history.append(val_loss)
+            val_acc_history.append(val_acc)
+            if args.early_stopping > 0 and epoch > args.early_stopping:
+                tmp = torch.tensor(
+                    val_loss_history[-(args.early_stopping + 1):-1])
+                if val_loss > tmp.mean().item():
+                    break
 
-    return test_metric, best_val_metric, Gamma_0
-
-
-def fix_seed(seed):
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    return test_acc, best_val_acc, Gamma_0
 
 
 if __name__ == '__main__':
@@ -135,12 +121,12 @@ if __name__ == '__main__':
     parser.add_argument('--early_stopping', type=int, default=200)
     parser.add_argument('--hidden', type=int, default=64)
     parser.add_argument('--dropout', type=float, default=0.5)
-    parser.add_argument('--train_rate', type=float, default=0.6)
-    parser.add_argument('--val_rate', type=float, default=0.2)
+    parser.add_argument('--train_rate', type=float, default=0.025)
+    parser.add_argument('--val_rate', type=float, default=0.025)
     parser.add_argument('--K', type=int, default=10)
     parser.add_argument('--alpha', type=float, default=0.1)
     parser.add_argument('--lower', type=float, default=0.000001)
-    parser.add_argument('--upper', type=float, default=2.0000000)
+    parser.add_argument('--upper', type=float, default=2.0)
     parser.add_argument('--dprate', type=float, default=0.5)
     parser.add_argument('--C', type=int)
     parser.add_argument('--Init', type=str,
@@ -153,7 +139,6 @@ if __name__ == '__main__':
                         choices=['g_0', 'g_1', 'g_2', 'g_3','g_band_rejection'],
                         default='g_1')
     parser.add_argument('--homophily', type=bool, default=False, help='Cora, Citeseer, Pubmed are homophily')
-    parser.add_argument('--Threeterm', type=bool, default=False, help='Chebyshev three terms')
     parser.add_argument('--Vandermonde', type=bool, default=False, help='Should we obtain coeffs with Vandermonde or Arnoldi?')
     parser.add_argument('--Gamma', default=None)
     parser.add_argument('--ppnp', default='GPR_prop',
@@ -162,36 +147,36 @@ if __name__ == '__main__':
                         choices=['PPNP', 'GArnoldi_prop'])
     parser.add_argument('--heads', default=8, type=int)
     parser.add_argument('--output_heads', default=1, type=int)
-   
-    parser.add_argument('--dataset', default='cora')
+
+    parser.add_argument('--dataset', default='texas')
     parser.add_argument('--cuda', type=int, default=0)
-    parser.add_argument('--RPMAX', type=int, default=3)
+    parser.add_argument('--RPMAX', type=int, default=5)
     parser.add_argument('--net', type=str, choices=['GCN', 'GAT', 'APPNP', 'ChebNet', 'JKNet', 'GPRGNN', 'ARNOLDI', 'GARNOLDI'],
                         default='ChebNetII')
-   
+
     args = parser.parse_args()
-   
-   
+    
+    
     functionnames = ['g_band_rejection', 'g_band_pass', 'g_low_pass', 'g_high_pass']
     #functionnames = ['g_0', 'g_1', 'g_2', 'g_3']
     polynames = ['Monomial', 'Chebyshev','Legendre', 'Jacobi']
     #polynames = ['Chebyshev']
     #functionnames = ['g_low_pass']
-   
+    
     methodnames = ['GARNOLDI']
     #methodnames = ['GCN', 'GAT', 'APPNP','ChebNet', 'JKNet','GPRGNN','BernNet']
-    LR = [ 0.001,0.002,0.01,0.05]
-    MYdropout = [0.1, 0.2, 0.3, 0.4, 0.5,0.6,0.7,0.8,0.9]
-    sys.stdout = open('CoraFull-Complex.txt', 'w')
+    LR = [  0.002]
+    MYdropout = [0.5]
+    #sys.stdout = open('PubmedHyperOPTComplexes-L.txt', 'w')
     print("HYPER PARAMETER TUNING")
     for l in range (len(LR)):
         print("---------------------------------------------- LR = ", LR[l] )
-       
+        
         for d in range (len(MYdropout)):
             print("===================================== DROPOUT = ", MYdropout[d])
             for i in range(len(functionnames)):
                 for j in range(len(polynames)):
-                    for t in range(len(methodnames)):  
+                    for t in range(len(methodnames)):   
                         args.net = methodnames[t]
                         args.FuncName = functionnames[i]
                         args.ArnoldiInit = polynames[j]
@@ -220,14 +205,14 @@ if __name__ == '__main__':
                             Net = ChebNetII
                         elif gnn_name == 'BernNet':
                             Net = BernNet
-                       
-                   
+                        
+                    
                         dname = args.dataset
                         dataset, data = DataLoader(dname)
-                   
+                    
                         RPMAX = args.RPMAX
                         Init = args.Init
-                   
+                    
                         Gamma_0 = None
                         alpha = args.alpha
                         train_rate = args.train_rate
@@ -235,24 +220,24 @@ if __name__ == '__main__':
                         percls_trn = int(round(train_rate*len(data.y)/dataset.num_classes))
                         val_lb = int(round(val_rate*len(data.y)))
                         TrueLBrate = (percls_trn*dataset.num_classes+val_lb)/len(data.y)
-                        print(f'Number of classes: {dataset.num_classes}')
                         print('True Label rate: ', TrueLBrate)
-                   
+                    
                         args.C = len(data.y.unique())
                         args.Gamma = Gamma_0
-                   
+                    
                         Results0 = []
-                   
+                    
                         for RP in tqdm(range(RPMAX)):
-                   
-                            test_acc, best_val_acc, Gamma_0 = RunExp(args, dataset, data, Net, RP)
+                    
+                            test_acc, best_val_acc, Gamma_0 = RunExp(
+                                args, dataset, data, Net, percls_trn, val_lb)
                             Results0.append([test_acc, best_val_acc, Gamma_0])
                             #print(f'run_{str(RP+1)} \t test_acc: {test_acc:.4f}')
-                   
+                    
                         test_acc_mean, val_acc_mean, _ = np.mean(np.array(Results0, dtype=object), axis=0) * 100
                         test_acc_std = np.sqrt(np.var(np.array(Results0, dtype=object), axis=0)[0]) * 100
-                       
-                       
+                        
+                        
                         if args.net in ['GARNOLDI','ARNOLDI']:
                             print(f'{gnn_name}-{PolyName} ({funcName}) with Vandermonde? {args.Vandermonde} on dataset {args.dataset}, in {RPMAX} repeated experiment:')
                             print(
@@ -261,6 +246,6 @@ if __name__ == '__main__':
                             print(f'{gnn_name}  on dataset {args.dataset}, in {RPMAX} repeated experiment:')
                             print(
                                 f'test acc mean = {test_acc_mean:.4f} \t test acc std = {test_acc_std:.4f} \t val acc mean = {val_acc_mean:.4f}')
-   
-   
-    sys.stdout.close()        
+    
+    
+    #sys.stdout.close()         
