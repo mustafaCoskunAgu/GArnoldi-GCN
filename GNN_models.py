@@ -11,7 +11,7 @@ from torch.nn import Parameter
 from torch.nn import Linear
 from torch_geometric.nn import GATConv, GCNConv, ChebConv
 from torch_geometric.nn import JumpingKnowledge
-from torch_geometric.nn import MessagePassing, APPNP, ARNOLDI
+from torch_geometric.nn import MessagePassing, APPNP
 #from torch_geometric.nn import ARNOLDI
 from arnoldi import*
 #from torch_geometric.nn.conv.arnoldi import *
